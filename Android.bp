@@ -1,0 +1,27 @@
+cc_defaults {
+    name: "iouring_defaults",
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-pointer-arith",
+    ],
+    export_include_dirs: ["src/include"],
+    srcs: [
+        "src/queue.c",
+        "src/register.c",
+        "src/setup.c",
+        "src/syscall.c",
+    ],
+}
+
+cc_library_static {
+    name: "liburing",
+    defaults: [
+        "iouring_defaults",
+    ],
+    recovery_available: true,
+    ramdisk_available: true,
+    vendor_ramdisk_available: true,
+}
+
