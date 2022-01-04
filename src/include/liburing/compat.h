@@ -2,8 +2,12 @@
 #ifndef LIBURING_COMPAT_H
 #define LIBURING_COMPAT_H
 
-#include <linux/time_types.h>
-
+#include <stdint.h>
 #include <inttypes.h>
-#include <linux/openat2.h>
+#include <uapi/linux/openat2.h>
+
+typedef int __kernel_rwf_t;
+
+struct __kernel_timespec;
+
 #endif
