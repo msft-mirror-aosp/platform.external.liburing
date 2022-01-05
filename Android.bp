@@ -31,6 +31,7 @@ cc_defaults {
         "-Werror",
         "-Wno-pointer-arith",
     ],
+    include_dirs: ["bionic/libc/kernel"],
     export_include_dirs: ["src/include"],
     srcs: [
         "src/queue.c",
@@ -48,4 +49,6 @@ cc_library_static {
     recovery_available: true,
     ramdisk_available: true,
     vendor_ramdisk_available: true,
+    host_supported: true,
+    device_supported: true,
 }
