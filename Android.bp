@@ -31,13 +31,12 @@ cc_defaults {
         "-Werror",
         "-Wno-pointer-arith",
         "-Wno-unused-parameter",
-	"-Wno-implicit-function-declaration",
-	"-D_GNU_SOURCE"
+        "-Wno-implicit-function-declaration",
+        "-D_GNU_SOURCE"
     ],
-    include_dirs: ["bionic/libc/kernel"],
     export_include_dirs: [
         "src/include",
-	"src/arch",
+        "src/arch",
     ],
     srcs: [
         "src/queue.c",
