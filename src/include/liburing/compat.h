@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 #include <inttypes.h>
-#include <uapi/linux/openat2.h>
+#include <linux/openat2.h>
 
 typedef int __kernel_rwf_t;
 
