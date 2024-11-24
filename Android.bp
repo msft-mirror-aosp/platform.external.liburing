@@ -31,7 +31,6 @@ cc_defaults {
         "-Werror",
         "-Wno-pointer-arith",
         "-Wno-unused-parameter",
-        "-Wno-implicit-function-declaration",
         "-D_GNU_SOURCE"
     ],
     export_include_dirs: [
