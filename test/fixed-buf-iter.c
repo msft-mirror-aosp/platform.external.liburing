@@ -63,7 +63,7 @@ static int test(struct io_uring *ring)
 		return 1;
 	}
 
-	if (cqe->res < 0) { 
+	if (cqe->res < 0) {
 		fprintf(stderr, "Error in async operation: %s\n", strerror(-cqe->res));
 		return 1;
 	}
@@ -87,6 +87,8 @@ static int test(struct io_uring *ring)
 		return 1;
 	}
 	io_uring_cqe_seen(ring, cqe);
+	for (i = 0; i < BUFFERS; i++)
+		free(iov[i].iov_base);
 	return 0;
 }
 
@@ -96,20 +98,20 @@ int main(int argc, char *argv[])
 	int ret;
 
 	if (argc > 1)
-		return 0;
+		return T_EXIT_SKIP;
 
 	ret = t_create_ring(8, &ring, 0);
 	if (ret == T_SETUP_SKIP)
-		return 0;
+		return T_EXIT_SKIP;
 	else if (ret < 0)
-		return 1;
+		return T_EXIT_FAIL;
 
 	ret = test(&ring);
 	if (ret) {
 		fprintf(stderr, "Test failed\n");
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 	io_uring_queue_exit(&ring);
-	return 0;
+	return T_EXIT_PASS;
 }
