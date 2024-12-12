@@ -14,42 +14,19 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include "helpers.h"
 #include "liburing.h"
 #include "../src/syscall.h"
 
 #define TIMEOUT_MSEC	200
 static int not_supported;
 static int no_modify;
+static int no_multishot;
 
 static void msec_to_ts(struct __kernel_timespec *ts, unsigned int msec)
 {
 	ts->tv_sec = msec / 1000;
 	ts->tv_nsec = (msec % 1000) * 1000000;
-}
-
-static unsigned long long mtime_since(const struct timeval *s,
-				      const struct timeval *e)
-{
-	long long sec, usec;
-
-	sec = e->tv_sec - s->tv_sec;
-	usec = (e->tv_usec - s->tv_usec);
-	if (sec > 0 && usec < 0) {
-		sec--;
-		usec += 1000000;
-	}
-
-	sec *= 1000;
-	usec /= 1000;
-	return sec + usec;
-}
-
-static unsigned long long mtime_since_now(struct timeval *tv)
-{
-	struct timeval end;
-
-	gettimeofday(&end, NULL);
-	return mtime_since(tv, &end);
 }
 
 /*
@@ -156,7 +133,7 @@ static int test_single_timeout_nr(struct io_uring *ring, int nr)
 
 		/*
 		 * NOP commands have user_data as 1. Check that we get the
-		 * at least 'nr' NOPs first, then the successfully removed timout.
+		 * at least 'nr' NOPs first, then the successfully removed timeout.
 		 */
 		if (io_uring_cqe_get_data(cqe) == NULL) {
 			if (i < nr) {
@@ -176,7 +153,7 @@ static int test_single_timeout_nr(struct io_uring *ring, int nr)
 			goto err;
 		}
 		i++;
-	};
+	}
 
 	return 0;
 err:
@@ -588,7 +565,7 @@ static int test_multi_timeout(struct io_uring *ring)
 		}
 
 		if (cqe->user_data != user_data) {
-			fprintf(stderr, "%s: unexpected timeout req %d sequece\n",
+			fprintf(stderr, "%s: unexpected timeout req %d sequence\n",
 				__FUNCTION__, i+1);
 			goto err;
 		}
@@ -678,7 +655,7 @@ static int test_multi_timeout_nr(struct io_uring *ring)
 		case 1:
 			/* Should be timeout req_2 */
 			if (cqe->user_data != 2) {
-				fprintf(stderr, "%s: unexpected timeout req %d sequece\n",
+				fprintf(stderr, "%s: unexpected timeout req %d sequence\n",
 					__FUNCTION__, i+1);
 				goto err;
 			}
@@ -691,7 +668,7 @@ static int test_multi_timeout_nr(struct io_uring *ring)
 		case 2:
 			/* Should be timeout req_1 */
 			if (cqe->user_data != 1) {
-				fprintf(stderr, "%s: unexpected timeout req %d sequece\n",
+				fprintf(stderr, "%s: unexpected timeout req %d sequence\n",
 					__FUNCTION__, i+1);
 				goto err;
 			}
@@ -978,6 +955,7 @@ static int test_update_timeout(struct io_uring *ring, unsigned long ms,
 	struct io_uring_cqe *cqe;
 	struct __kernel_timespec ts, ts_upd;
 	unsigned long long exp_ms, base_ms = 10000;
+	bool update_ealready = false;
 	struct timeval tv;
 	int ret, i, nr = 2;
 	__u32 mode = abs ? IORING_TIMEOUT_ABS : 0;
@@ -1040,6 +1018,16 @@ static int test_update_timeout(struct io_uring *ring, unsigned long ms,
 			}
 			break;
 		case 2:
+			/*
+			 * We should not be hitting this case, but for
+			 * a kernel with PREEMPT_RT, even an instant attempt
+			 * to remove a timer will return that the timer is
+			 * already running... Deal with it.
+			 */
+			if (cqe->res == -EALREADY) {
+				update_ealready = true;
+				break;
+			}
 			if (cqe->res != 0) {
 				fprintf(stderr, "%s: got %d, wanted %d\n",
 						__FUNCTION__, cqe->res,
@@ -1060,7 +1048,7 @@ static int test_update_timeout(struct io_uring *ring, unsigned long ms,
 	}
 
 	exp_ms = mtime_since_now(&tv);
-	if (exp_ms >= base_ms / 2) {
+	if (!update_ealready && exp_ms >= base_ms / 2) {
 		fprintf(stderr, "too long, timeout wasn't updated\n");
 		goto err;
 	}
@@ -1231,7 +1219,7 @@ static int test_timeout_link_cancel(void)
 			exit(1);
 		}
 
-		/* trigger full cancellation */
+		/* trigger full cancelation */
 		ret = execl(prog_path, prog_path, NULL);
 		if (ret) {
 			fprintf(stderr, "exec failed %i\n", errno);
@@ -1303,7 +1291,6 @@ static int test_not_failing_links(void)
 		fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
 		return 1;
 	} else if (cqe->user_data == 1 && cqe->res == -EINVAL) {
-		fprintf(stderr, "ETIME_SUCCESS is not supported, skip\n");
 		goto done;
 	} else if (cqe->res != -ETIME || cqe->user_data != 1) {
 		fprintf(stderr, "timeout failed %i %i\n", cqe->res,
@@ -1325,6 +1312,246 @@ done:
 	io_uring_cqe_seen(&ring, cqe);
 	io_uring_queue_exit(&ring);
 	return 0;
+}
+
+
+static int test_timeout_multishot(struct io_uring *ring)
+{
+	struct io_uring_cqe *cqe;
+	struct io_uring_sqe *sqe;
+	struct __kernel_timespec ts;
+	int ret;
+
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		fprintf(stderr, "%s: get sqe failed\n", __FUNCTION__);
+		goto err;
+	}
+
+	msec_to_ts(&ts, TIMEOUT_MSEC);
+	io_uring_prep_timeout(sqe, &ts, 0, IORING_TIMEOUT_MULTISHOT);
+	io_uring_sqe_set_data(sqe, (void *) 1);
+
+	ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "%s: sqe submit failed: %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	for (int i = 0; i < 2; i++) {
+		ret = io_uring_wait_cqe(ring, &cqe);
+		if (ret < 0) {
+			fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+			goto err;
+		}
+
+		ret = cqe->res;
+		if (ret == -EINVAL) {
+			no_multishot = 1;
+			return T_EXIT_SKIP;
+		}
+
+		if (!(cqe->flags & IORING_CQE_F_MORE)) {
+			fprintf(stderr, "%s: flag not set in cqe\n", __FUNCTION__);
+			goto err;
+		}
+
+		if (ret != -ETIME) {
+			fprintf(stderr, "%s: Timeout: %s\n", __FUNCTION__, strerror(-ret));
+			goto err;
+		}
+
+		io_uring_cqe_seen(ring, cqe);
+	}
+
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		fprintf(stderr, "%s: get sqe failed\n", __FUNCTION__);
+		goto err;
+	}
+
+	io_uring_prep_timeout_remove(sqe, 1, 0);
+	io_uring_sqe_set_data(sqe, (void *) 2);
+
+	ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "%s: sqe submit failed: %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = io_uring_wait_cqe(ring, &cqe);
+	if (ret < 0) {
+		fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = cqe->res;
+	if (ret < 0) {
+		fprintf(stderr, "%s: remove failed: %s\n", __FUNCTION__, strerror(-ret));
+		goto err;
+	}
+
+	io_uring_cqe_seen(ring, cqe);
+
+	ret = io_uring_wait_cqe(ring, &cqe);
+	if (ret < 0) {
+		fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = cqe->res;
+	if (ret != -ECANCELED) {
+		fprintf(stderr, "%s: timeout canceled: %s %llu\n", __FUNCTION__, strerror(-ret), cqe->user_data);
+		goto err;
+	}
+
+	io_uring_cqe_seen(ring, cqe);
+	return 0;
+err:
+	return 1;
+}
+
+
+static int test_timeout_multishot_nr(struct io_uring *ring)
+{
+	struct io_uring_cqe *cqe;
+	struct io_uring_sqe *sqe;
+	struct __kernel_timespec ts;
+	int ret;
+
+	if (no_multishot)
+		return T_EXIT_SKIP;
+
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		fprintf(stderr, "%s: get sqe failed\n", __FUNCTION__);
+		goto err;
+	}
+
+	msec_to_ts(&ts, TIMEOUT_MSEC);
+	io_uring_prep_timeout(sqe, &ts, 3, IORING_TIMEOUT_MULTISHOT);
+	io_uring_sqe_set_data(sqe, (void *) 1);
+
+	ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "%s: sqe submit failed: %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	for (int i = 0; i < 3; i++) {
+		ret = io_uring_wait_cqe(ring, &cqe);
+		if (ret < 0) {
+			fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+			goto err;
+		}
+
+		if (i < 2 && !(cqe->flags & IORING_CQE_F_MORE)) {
+			fprintf(stderr, "%s: flag not set in cqe\n", __FUNCTION__);
+			goto err;
+		}
+		if (i == 3 && (cqe->flags & IORING_CQE_F_MORE)) {
+			fprintf(stderr, "%s: flag set in cqe\n", __FUNCTION__);
+			goto err;
+		}
+
+		ret = cqe->res;
+		if (ret != -ETIME) {
+			fprintf(stderr, "%s: Timeout: %s\n", __FUNCTION__, strerror(-ret));
+			goto err;
+		}
+
+		io_uring_cqe_seen(ring, cqe);
+	}
+
+	msec_to_ts(&ts, 2 * TIMEOUT_MSEC);
+	ret = io_uring_wait_cqe_timeout(ring, &cqe, &ts);
+	if (ret != -ETIME) {
+		fprintf(stderr, "%s: wait completion timeout %s\n", __FUNCTION__, strerror(-ret));
+		goto err;
+	}
+
+	return 0;
+err:
+	return 1;
+}
+
+
+static int test_timeout_multishot_overflow(struct io_uring *ring)
+{
+	struct io_uring_cqe *cqe;
+	struct io_uring_sqe *sqe;
+	struct __kernel_timespec ts;
+	int ret;
+
+	if (no_multishot)
+		return T_EXIT_SKIP;
+
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		fprintf(stderr, "%s: get sqe failed\n", __FUNCTION__);
+		goto err;
+	}
+
+	msec_to_ts(&ts, 10);
+	io_uring_prep_timeout(sqe, &ts, 0, IORING_TIMEOUT_MULTISHOT);
+	io_uring_sqe_set_data(sqe, (void *) 1);
+
+	ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "%s: sqe submit failed: %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = io_uring_wait_cqe(ring, &cqe);
+	if (ret < 0) {
+		fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = cqe->res;
+	if (ret != -ETIME) {
+		fprintf(stderr, "%s: Timeout: %s\n", __FUNCTION__, strerror(-ret));
+		goto err;
+	}
+
+	io_uring_cqe_seen(ring, cqe);
+	sleep(1);
+
+	if (!((*ring->sq.kflags) & IORING_SQ_CQ_OVERFLOW)) {
+		goto err;
+	}
+
+	/* multishot timer should be gone */
+	sqe = io_uring_get_sqe(ring);
+	if (!sqe) {
+		fprintf(stderr, "%s: get sqe failed\n", __FUNCTION__);
+		goto err;
+	}
+
+	io_uring_prep_timeout_remove(sqe, 1, 0);
+
+	ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "%s: sqe submit failed: %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = io_uring_wait_cqe(ring, &cqe);
+	if (ret < 0) {
+		fprintf(stderr, "%s: wait completion %d\n", __FUNCTION__, ret);
+		goto err;
+	}
+
+	ret = cqe->res;
+	io_uring_cqe_seen(ring, cqe);
+	if (ret != -ETIME) {
+		fprintf(stderr, "%s: remove failed: %d %s\n", __FUNCTION__, ret, strerror(-ret));
+		goto err;
+	}
+
+	return 0;
+err:
+	return 1;
 }
 
 
@@ -1418,6 +1645,40 @@ int main(int argc, char *argv[])
 	if (ret) {
 		fprintf(stderr, "test_timeout_flags3 failed\n");
 		return ret;
+	}
+
+	ret = test_timeout_multishot(&ring);
+	if (ret && ret != T_EXIT_SKIP) {
+		fprintf(stderr, "test_timeout_multishot failed\n");
+		return ret;
+	}
+
+	ret = test_timeout_multishot_nr(&ring);
+	if (ret && ret != T_EXIT_SKIP) {
+		fprintf(stderr, "test_timeout_multishot_nr failed\n");
+		return ret;
+	}
+
+	/* io_uring_wait_cqe_timeout() may have left a timeout, reinit ring */
+	io_uring_queue_exit(&ring);
+	ret = io_uring_queue_init(8, &ring, 0);
+	if (ret) {
+		fprintf(stderr, "ring setup failed\n");
+		return 1;
+	}
+
+	ret = test_timeout_multishot_overflow(&ring);
+	if (ret && ret != T_EXIT_SKIP) {
+		fprintf(stderr, "test_timeout_multishot_overflow failed\n");
+		return ret;
+	}
+
+	/* io_uring_wait_cqe_timeout() may have left a timeout, reinit ring */
+	io_uring_queue_exit(&ring);
+	ret = io_uring_queue_init(8, &ring, 0);
+	if (ret) {
+		fprintf(stderr, "ring setup failed\n");
+		return 1;
 	}
 
 	ret = test_single_timeout_wait(&ring, &p);

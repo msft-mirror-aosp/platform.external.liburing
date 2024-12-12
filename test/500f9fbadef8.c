@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
 	int ret, fd;
 
 	if (argc > 1)
-		return 0;
+		return T_EXIT_SKIP;
 
 	t_posix_memalign(&iov.iov_base, 4096, 4096);
 	iov.iov_len = 4096;
@@ -35,15 +35,17 @@ int main(int argc, char *argv[])
 	ret = io_uring_queue_init(1, &ring, IORING_SETUP_IOPOLL);
 	if (ret) {
 		fprintf(stderr, "ring setup failed\n");
-		return 1;
+		return T_EXIT_FAIL;
 
 	}
 
 	sprintf(buf, "./XXXXXX");
 	fd = mkostemp(buf, O_WRONLY | O_DIRECT | O_CREAT);
 	if (fd < 0) {
+		if (errno == EINVAL)
+			return T_EXIT_SKIP;
 		perror("mkostemp");
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 	offset = 0;
@@ -73,17 +75,19 @@ int main(int argc, char *argv[])
 		io_uring_cqe_seen(&ring, cqe);
 		offset += 4096;
 	} while (--blocks);
-		
+
 	close(fd);
 	unlink(buf);
-	return 0;
+	free(iov.iov_base);
+	return T_EXIT_PASS;
 err:
 	close(fd);
 	unlink(buf);
-	return 1;
+	free(iov.iov_base);
+	return T_EXIT_FAIL;
 skipped:
 	fprintf(stderr, "Polling not supported in current dir, test skipped\n");
 	close(fd);
 	unlink(buf);
-	return 0;
+	return T_EXIT_SKIP;
 }

@@ -16,22 +16,24 @@
 #include "helpers.h"
 
 #define MAX_MSG	128
-
-#define PORT	10201
 #define HOST	"127.0.0.1"
+static __be16 bind_port;
+struct recv_data {
+	pthread_barrier_t barrier;
+	int use_recvmsg;
+	struct msghdr msg;
+};
 
 static int recv_prep(struct io_uring *ring, struct iovec *iov, int *sock,
-		     int use_recvmsg)
+		     struct recv_data *rd)
 {
 	struct sockaddr_in saddr;
 	struct io_uring_sqe *sqe;
 	int sockfd, ret, val;
-	struct msghdr msg = { };
 
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sin_family = AF_INET;
 	saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	saddr.sin_port = htons(PORT);
 
 	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sockfd < 0) {
@@ -42,21 +44,24 @@ static int recv_prep(struct io_uring *ring, struct iovec *iov, int *sock,
 	val = 1;
 	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
-	ret = bind(sockfd, (struct sockaddr *)&saddr, sizeof(saddr));
-	if (ret < 0) {
+	if (t_bind_ephemeral_port(sockfd, &saddr)) {
 		perror("bind");
 		goto err;
 	}
+	bind_port = saddr.sin_port;
 
 	sqe = io_uring_get_sqe(ring);
-	if (!use_recvmsg) {
+	if (!rd->use_recvmsg) {
 		io_uring_prep_recv(sqe, sockfd, iov->iov_base, iov->iov_len,
 					MSG_WAITALL);
 	} else {
-		msg.msg_namelen = sizeof(struct sockaddr_in);
-		msg.msg_iov = iov;
-		msg.msg_iovlen = 1;
-		io_uring_prep_recvmsg(sqe, sockfd, &msg, MSG_WAITALL);
+		struct msghdr *msg = &rd->msg;
+
+		memset(msg, 0, sizeof(*msg));
+		msg->msg_namelen = sizeof(struct sockaddr_in);
+		msg->msg_iov = iov;
+		msg->msg_iovlen = 1;
+		io_uring_prep_recvmsg(sqe, sockfd, msg, MSG_WAITALL);
 	}
 
 	sqe->user_data = 2;
@@ -103,11 +108,6 @@ err:
 	return 1;
 }
 
-struct recv_data {
-	pthread_mutex_t mutex;
-	int use_recvmsg;
-};
-
 static void *recv_fn(void *data)
 {
 	struct recv_data *rd = data;
@@ -122,20 +122,20 @@ static void *recv_fn(void *data)
 
 	ret = t_create_ring_params(1, &ring, &p);
 	if (ret == T_SETUP_SKIP) {
-		pthread_mutex_unlock(&rd->mutex);
+		pthread_barrier_wait(&rd->barrier);
 		ret = 0;
 		goto err;
 	} else if (ret < 0) {
-		pthread_mutex_unlock(&rd->mutex);
+		pthread_barrier_wait(&rd->barrier);
 		goto err;
 	}
 
-	ret = recv_prep(&ring, &iov, &sock, rd->use_recvmsg);
+	ret = recv_prep(&ring, &iov, &sock, rd);
 	if (ret) {
 		fprintf(stderr, "recv_prep failed: %d\n", ret);
 		goto err;
 	}
-	pthread_mutex_unlock(&rd->mutex);
+	pthread_barrier_wait(&rd->barrier);
 	ret = do_recv(&ring);
 	close(sock);
 	io_uring_queue_exit(&ring);
@@ -165,18 +165,20 @@ static int do_send(void)
 
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sin_family = AF_INET;
-	saddr.sin_port = htons(PORT);
+	saddr.sin_port = bind_port;
 	inet_pton(AF_INET, HOST, &saddr.sin_addr);
 
 	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sockfd < 0) {
 		perror("socket");
+		free(buf);
 		return 1;
 	}
 
 	ret = connect(sockfd, (struct sockaddr *)&saddr, sizeof(saddr));
 	if (ret < 0) {
 		perror("connect");
+		free(buf);
 		return 1;
 	}
 
@@ -201,6 +203,7 @@ static int do_send(void)
 		if (cqe->res == -EINVAL) {
 			fprintf(stdout, "send not supported, skipping\n");
 			close(sockfd);
+			free(buf);
 			return 0;
 		}
 		if (cqe->res != iov.iov_len) {
@@ -211,36 +214,34 @@ static int do_send(void)
 	}
 
 	close(sockfd);
+	free(buf);
 	return 0;
 err:
 	close(sockfd);
+	free(buf);
 	return 1;
 }
 
 static int test(int use_recvmsg)
 {
-	pthread_mutexattr_t attr;
 	pthread_t recv_thread;
 	struct recv_data rd;
 	int ret;
 	void *retval;
 
-	pthread_mutexattr_init(&attr);
-	pthread_mutexattr_setpshared(&attr, 1);
-	pthread_mutex_init(&rd.mutex, &attr);
-	pthread_mutex_lock(&rd.mutex);
+	pthread_barrier_init(&rd.barrier, NULL, 2);
 	rd.use_recvmsg = use_recvmsg;
 
 	ret = pthread_create(&recv_thread, NULL, recv_fn, &rd);
 	if (ret) {
 		fprintf(stderr, "Thread create failed: %d\n", ret);
-		pthread_mutex_unlock(&rd.mutex);
 		return 1;
 	}
 
-	pthread_mutex_lock(&rd.mutex);
+	pthread_barrier_wait(&rd.barrier);
 	do_send();
 	pthread_join(recv_thread, &retval);
+	pthread_barrier_destroy(&rd.barrier);
 	return (intptr_t)retval;
 }
 
