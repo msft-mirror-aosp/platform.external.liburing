@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <pthread.h>
+#include <assert.h>
 
 #include "liburing.h"
 #include "helpers.h"
@@ -19,10 +20,10 @@ static char str[] = "This is a test of send and recv over io_uring!";
 
 #define MAX_MSG	128
 
-#define PORT	10202
 #define HOST	"127.0.0.1"
 
 static int no_socket;
+static __be32 g_port;
 
 static int recv_prep(struct io_uring *ring, struct iovec *iov, int *sock,
 		     int registerfiles)
@@ -34,7 +35,6 @@ static int recv_prep(struct io_uring *ring, struct iovec *iov, int *sock,
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sin_family = AF_INET;
 	saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	saddr.sin_port = htons(PORT);
 
 	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sockfd < 0) {
@@ -45,11 +45,11 @@ static int recv_prep(struct io_uring *ring, struct iovec *iov, int *sock,
 	val = 1;
 	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
-	ret = bind(sockfd, (struct sockaddr *)&saddr, sizeof(saddr));
-	if (ret < 0) {
+	if (t_bind_ephemeral_port(sockfd, &saddr)) {
 		perror("bind");
 		goto err;
 	}
+	g_port = saddr.sin_port;
 
 	if (registerfiles) {
 		ret = io_uring_register_files(ring, &sockfd, 1);
@@ -244,9 +244,10 @@ static int do_send(int socket_direct, int alloc)
 		}
 	}
 
+	assert(g_port != 0);
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sin_family = AF_INET;
-	saddr.sin_port = htons(PORT);
+	saddr.sin_port = g_port;
 	inet_pton(AF_INET, HOST, &saddr.sin_addr);
 
 	sqe = io_uring_get_sqe(&ring);
@@ -271,7 +272,6 @@ static int do_send(int socket_direct, int alloc)
 	}
 	if (cqe->res < 0) {
 		if (cqe->res == -EINVAL) {
-			fprintf(stdout, "No socket support, skipping\n");
 			no_socket = 1;
 			io_uring_cqe_seen(&ring, cqe);
 			return fallback_send(&ring, &saddr);
@@ -365,6 +365,43 @@ static int test(int use_sqthread, int regfiles, int socket_direct, int alloc)
 	return (intptr_t)retval;
 }
 
+static int test_bad_socket(void)
+{
+	struct io_uring ring;
+	struct io_uring_cqe *cqe;
+	struct io_uring_sqe *sqe;
+	int ret;
+
+	ret = io_uring_queue_init(1, &ring, 0);
+	if (ret) {
+		fprintf(stderr, "queue init failed: %d\n", ret);
+		return 1;
+	}
+
+	sqe = io_uring_get_sqe(&ring);
+	io_uring_prep_socket(sqe, -1, SOCK_DGRAM, 0, 0);
+	ret = io_uring_submit(&ring);
+	if (ret != 1) {
+		fprintf(stderr, "socket submit: %d\n", ret);
+		goto err;
+	}
+	ret = io_uring_wait_cqe(&ring, &cqe);
+	if (ret) {
+		fprintf(stderr, "wait_cqe: %d\n", ret);
+		goto err;
+	}
+	if (cqe->res != -EAFNOSUPPORT) {
+		fprintf(stderr, "socket res: %d\n", cqe->res);
+		goto err;
+	}
+	io_uring_cqe_seen(&ring, cqe);
+	io_uring_queue_exit(&ring);
+	return 0;
+err:
+	io_uring_queue_exit(&ring);
+	return 1;
+}
+
 int main(int argc, char *argv[])
 {
 	int ret;
@@ -402,6 +439,12 @@ int main(int argc, char *argv[])
 	if (ret) {
 		fprintf(stderr, "test sqthread=0 direct=alloc failed\n");
 		return ret;
+	}
+
+	ret = test_bad_socket();
+	if (ret) {
+		fprintf(stderr, "test bad socket failed\n");
+		return 1;
 	}
 
 	return 0;

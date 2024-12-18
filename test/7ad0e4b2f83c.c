@@ -3,31 +3,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include "liburing.h"
-
-static unsigned long long mtime_since(const struct timeval *s,
-				      const struct timeval *e)
-{
-	long long sec, usec;
-
-	sec = e->tv_sec - s->tv_sec;
-	usec = (e->tv_usec - s->tv_usec);
-	if (sec > 0 && usec < 0) {
-		sec--;
-		usec += 1000000;
-	}
-
-	sec *= 1000;
-	usec /= 1000;
-	return sec + usec;
-}
-
-static unsigned long long mtime_since_now(struct timeval *tv)
-{
-	struct timeval end;
-
-	gettimeofday(&end, NULL);
-	return mtime_since(tv, &end);
-}
+#include "helpers.h"
 
 int main(int argc, char *argv[])
 {
@@ -40,12 +16,12 @@ int main(int argc, char *argv[])
 	int ret;
 
 	if (argc > 1)
-		return 0;
+		return T_EXIT_SKIP;
 
 	ret = io_uring_queue_init(32, &ring, 0);
 	if (ret) {
 		fprintf(stderr, "io_uring_queue_init=%d\n", ret);
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 	sqe = io_uring_get_sqe(&ring);
@@ -53,7 +29,7 @@ int main(int argc, char *argv[])
 	ret = io_uring_submit(&ring);
 	if (ret != 1) {
 		fprintf(stderr, "io_uring_submit1=%d\n", ret);
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 
@@ -62,7 +38,7 @@ int main(int argc, char *argv[])
 	ret = io_uring_wait_cqe_timeout(&ring, &cqe, &ts1);
 	if (ret) {
 		fprintf(stderr, "io_uring_wait_cqe_timeout=%d\n", ret);
-		return 1;
+		return T_EXIT_FAIL;
 	}
 	io_uring_cqe_seen(&ring, cqe);
 	gettimeofday(&tv, NULL);
@@ -75,7 +51,7 @@ int main(int argc, char *argv[])
 	ret = io_uring_submit(&ring);
 	if (ret != 1) {
 		fprintf(stderr, "io_uring_submit2=%d\n", ret);
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 	io_uring_wait_cqe(&ring, &cqe);
@@ -83,11 +59,11 @@ int main(int argc, char *argv[])
 	msec = mtime_since_now(&tv);
 	if (msec >= 900 && msec <= 1100) {
 		io_uring_queue_exit(&ring);
-		return 0;
+		return T_EXIT_PASS;
 	}
 
 	fprintf(stderr, "%s: Timeout seems wonky (got %lu)\n", __FUNCTION__,
 								msec);
 	io_uring_queue_exit(&ring);
-	return 1;
+	return T_EXIT_FAIL;
 }

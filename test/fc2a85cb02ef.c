@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "liburing.h"
+#include "helpers.h"
 #include "../src/syscall.h"
 
 static bool write_file(const char* file, const char* what, ...)
@@ -53,7 +54,7 @@ static int inject_fault(int nth)
   return fd;
 }
 
-static int setup_fault()
+static int setup_fault(void)
 {
   static struct {
     const char* file;
@@ -78,16 +79,16 @@ static int setup_fault()
   return 0;
 }
 
-uint64_t r[2] = {0xffffffffffffffff, 0xffffffffffffffff};
+static uint64_t r[2] = {0xffffffffffffffff, 0xffffffffffffffff};
 
 int main(int argc, char *argv[])
 {
   if (argc > 1)
-    return 0;
-  mmap((void *) 0x20000000ul, 0x1000000ul, 3ul, 0x32ul, -1, 0);
+    return T_EXIT_SKIP;
+  mmap((void *) 0x20000000ul, 0x1000000ul, 3ul, MAP_ANON|MAP_PRIVATE, -1, 0);
   if (setup_fault()) {
     printf("Test needs failslab/fail_futex/fail_page_alloc enabled, skipped\n");
-    return 0;
+    return T_EXIT_SKIP;
   }
   intptr_t res = 0;
   *(uint32_t*)0x20000000 = 0;
@@ -127,5 +128,5 @@ int main(int argc, char *argv[])
   *(uint32_t*)0x20000080 = r[1];
   inject_fault(1);
   __sys_io_uring_register(r[0], 2ul, (const void *) 0x20000080ul, 1ul);
-  return 0;
+  return T_EXIT_PASS;
 }
