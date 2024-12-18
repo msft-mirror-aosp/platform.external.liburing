@@ -14,9 +14,10 @@
 #include <arpa/inet.h>
 
 #include "liburing.h"
+#include "helpers.h"
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 static int recv_thread_ready = 0;
 static int recv_thread_done = 0;
@@ -76,7 +77,7 @@ static void *send_thread(void *arg)
 	return NULL;
 }
 
-void *recv_thread(void *arg)
+static void *recv_thread(void *arg)
 {
 	struct data *data = arg;
 	struct io_uring ring;
@@ -194,7 +195,7 @@ static int test_accept_timeout(int do_connect, unsigned long timeout)
 	if (ret) {
 		fprintf(stderr, "queue_init: %d\n", ret);
 		return 1;
-	};
+	}
 
 	fast_poll = (p.features & IORING_FEAT_FAST_POLL) != 0;
 	io_uring_queue_exit(&ring);
@@ -239,16 +240,16 @@ static int test_accept_timeout(int do_connect, unsigned long timeout)
 int main(int argc, char *argv[])
 {
 	if (argc > 1)
-		return 0;
+		return T_EXIT_SKIP;
 	if (test_accept_timeout(0, 200000000)) {
 		fprintf(stderr, "accept timeout 0 failed\n");
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
 	if (test_accept_timeout(1, 1000000000)) {
 		fprintf(stderr, "accept and connect timeout 0 failed\n");
-		return 1;
+		return T_EXIT_FAIL;
 	}
 
-	return 0;
+	return T_EXIT_PASS;
 }
